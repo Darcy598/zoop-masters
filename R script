@@ -1,0 +1,496 @@
+## R script for Darcy masters, August 2019 ##
+
+# clear workspace #
+rm(list=ls())
+
+#see directory#
+getwd()
+
+#set working directory#
+setwd("/Users/darcyclement/Documents")
+
+#import data for species#
+df<-read.csv(header=TRUE, 'darcymasters.csv')
+df<-na.omit(df)
+
+# import data for decomposition rates #
+teabags<-read.csv(header=TRUE, 'Teabags.csv')
+teabags<-na.omit(teabags)
+
+#organise df#
+library(dplyr)
+library(plyr)
+df<-df %>% select(pond, Temp, Multiplier, sampling, sizegroup, group, subgroup, species, DWC)
+
+# remove rare species #
+df<-df %>% 
+  filter(!grepl('Acari', subgroup)) # remove acari
+df<-df %>% 
+  filter(!grepl('Collembola', subgroup)) # remove springtails
+df<-df %>% 
+  filter(!grepl('sphere', subgroup))
+
+#Renaming characters#
+df$subgroup<-gsub("Monogonont rotifers", "monogonont rotifers", df$subgroup)
+df$subgroup<-gsub("Chironimidae", "Chironomidae", df$subgroup)
+df$subgroup<-gsub("Backswimmer", "backswimmer", df$subgroup)
+df$subgroup<-gsub("Kidney blob", "Ciliate", df$subgroup)
+
+# Create abundance dataframe #
+sum.abun<-ddply(df, .(pond, subgroup, Temp), summarise,
+                abundance = sum(Multiplier))
+sum.abun$Log.abun=log10(sum.abun$abundance)
+
+
+### PCA for % abundance per pond ###
+
+## % abundance per pond ##
+
+# create the dataframe for relative % abundance per pond #
+pca.sum<-sum.abun %>% select(pond, Temp, subgroup, abundance) # select the data
+pca.sum<-group_by(pca.sum, pond) %>% mutate(percent = abundance/sum(abundance)) # create percentages
+pca.sum<-pca.sum %>% select(pond, percent, Temp, subgroup) # final data frame
+
+
+# get data ready for PCA #
+library(tidyverse)
+data_wide <- spread(pca.sum, subgroup, percent) # change data to long format
+data_wide[is.na(data_wide)]<-0 # change na to zeros
+ 
+
+# run PCA #
+row.names(data_wide)<-data_wide$pond # add row names for ponds
+data_pca<-princomp(data_wide[,3:10], cor=TRUE, scores=TRUE) # run PCA
+
+# look at PCA #
+summary(data_pca)
+loadings(data_pca)
+eigenvalues<-data_pca$sdev^2 # create the eigenvalues
+eigenvalues # view eigenvalues
+plot(data_pca, type="lines") #scree plot
+
+
+# create PCA plot #
+library("FactoMineR")
+library("factoextra")
+row.names(data_wide)<-data_wide$pond
+data_wide<-as.data.frame(data_wide)
+library(factoextra)
+fviz_eig(data_pca, addlabels = TRUE, ylim = c(0, 50)) # create correlation circle
+fviz_pca_biplot(data_pca, col.var = "black", col.ind="cos2",
+                group=data_wide$Temp,
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), 
+             repel = TRUE # Avoid text overlapping
+) 
+
+ggsave("screeplotponds.png")
+
+library("corrplot")
+corrplot(var$cos2, is.corr=FALSE) # correlation plot
+
+# contributions to PC1 and PC2 #
+fviz_contrib(data_pca, choice = "var", axes = 1, top = 10)
+fviz_contrib(data_pca, choice = "var", axes = 2, top = 10)
+fviz_contrib(data_pca, choice = "var", axes = 1:2, top = 10)
+
+# graphs of individuals #
+PCA.plot.pond<-fviz_pca_biplot(data_pca, habillage = data_wide$Temp, label="var", col.var="black",
+             repel = TRUE, # Avoid text overlapping
+)
+PCA.plot.pond
+
+# add labels to the pca plot #
+ggpubr::ggpar(PCA.plot.pond, 
+              title = "Principal Component Analysis",
+              subtitle = "Relative % abundance per pond",
+              caption = "Source: factoextra",
+              xlab = "PC1(27.2%)", ylab = "PC2(20.3%)",
+              legend.title = "Temps", legend.position = "top",
+              label=data_wide$pond
+              
+)
+
+ggsave("PCAplotponds.png")
+
+# relative abundance per temperature #
+
+# create dataframe #
+sum.abun.2<-ddply(df, .(Temp, subgroup), summarise,
+                abundance = sum(Multiplier))
+temp.per<-group_by(sum.abun.2, Temp) %>% mutate(percent = abundance/sum(abundance))
+temp.per<-temp.per%>% select(Temp, subgroup, percent)
+temp.wide <- spread(temp.per, subgroup, percent) # change data to long format
+
+# create the PCA #
+temp.wide[is.na(temp.wide)]<-0 # change na to zeros
+row.names(temp.wide)<-temp.wide$Temp
+temp.pca<-prcomp(temp.wide[,2:9],
+                 center= TRUE,
+                 scale. = TRUE) # run PCA with prcomp as more variables than observations
+
+
+# look at PCA #
+summary(temp.pca)
+
+# create PCA plots for temperatures #
+PCA.plot.temp<-fviz_pca_biplot(temp.pca, habillage =temp.wide$Temp, col.var="black",
+                               gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+                               repel = TRUE,
+                               label="var", # Avoid text overlapping
+                               
+)
+PCA.plot.temp
+
+# add labels PCA plot #
+ggpubr::ggpar(PCA.plot.temp, 
+              title = "Principal Component Analysis",
+              subtitle = "Relative % abundance per temperature",
+              caption = "Source: factoextra",
+              xlab = "PC1(29.9%)", ylab = "PC2(24.8%)",
+              legend.title = "Temperature", legend.position = "top",
+              label=TRUE
+              
+)
+
+ggsave("PCAplotTemp.png")
+
+
+### Abundance calculations ###
+
+## total abundance ##
+
+# plot with error bars, using ggplot #
+library(ggplot2)
+data_summary<-function(data, varname, groupnames){
+  require(plyr)
+  summary_func <- function(x, col){
+    c(mean = mean(x[[col]], na.rm=TRUE),
+      sd=sd(x[[col]], na.rm=TRUE))}
+  data_sum<-ddply(data, groupnames, .fun=summary_func,
+                  varname)
+  data_sum<-rename(data_sum, c("mean"=varname))
+  return(data_sum)}
+
+# summarise data #
+df2<-data_summary(sum.abun, varname="Log.abun",
+                  groupnames=c("Temp"))
+df2[is.na(df2)]<-0
+
+#convert Temp into a factor#
+sum.abun$Temp=as.factor(sum.abun$Temp)
+head(df2) # check temperature is now a factor
+
+# create scatterplot with error bars #
+abundance.plot<- ggplot(df2, aes(x=Temp, y=Log.abun)) +
+  ylim(0,4) +
+  geom_pointrange(aes(ymin=Log.abun-sd, ymax=Log.abun+sd))
+print(abundance.plot + ggtitle("Total log abundance of all 36 ponds with error bars"))
+
+# Save ggplot for total abundance #
+ggsave("absoluteabundance.png")
+
+## total abundance for microcrustacea ##
+# create the dataframe #
+sum.crus<- subset(df, group=='Crustacea') # pick out crustacea #
+sum.crus<-ddply(sum.crus, .(subgroup, pond, Temp), summarise, # calculate the abundance #
+                abundance = sum(Multiplier))
+sum.crus$Log.abun=log10(sum.crus$abundance) # create the log #
+
+# summarise data for ggplot #
+df3<-data_summary(sum.crus, varname="Log.abun",
+                  groupnames=c("Temp"))
+df3[is.na(df3)]<-0
+
+# creat the ggplot #
+abundance.plot.crus<- ggplot(df3, aes(x=Temp, y=Log.abun)) +
+  ylim(0,4) +
+  geom_pointrange(aes(ymin=Log.abun-sd, ymax=Log.abun+sd))
+print(abundance.plot.crus + ggtitle("Total log abundance of all microcrustacea")) # show graph #
+
+# save graph to directory #
+ggsave("crustaceaabundance.png")
+
+## total abundance for soft bodied meiofauna ##
+# create the soft bodied dataset #
+sum.soft<-subset(df, group=="Rotifera")
+sum.soft<-ddply(sum.soft, .(pond, Temp), summarise, # calculate the abundance #
+                abundance = sum(Multiplier))
+sum.soft$Log.abun=log10(sum.soft$abundance) # create the log #
+
+# summarise the data set for ggplot #
+df4<-data_summary(sum.soft, varname="Log.abun",
+                  groupnames=c("Temp"))
+df4[is.na(df4)]<-0
+
+# create the ggplot #
+abundance.plot.soft<- ggplot(df4, aes(x=Temp, y=Log.abun)) +
+  ylim(0,4) +
+  geom_pointrange(aes(ymin=Log.abun-sd, ymax=Log.abun+sd))
+print(abundance.plot.soft + ggtitle("Total log abundance of all soft bodied meiofauna")) # show graph #
+
+# save the ggplot for soft bodied meiofauna #
+ggsave("softbodieabundance.png")
+
+## total abundance for herbivorous zoops ##
+
+#create the dataset#
+sum.herb<-subset(df, subgroup %in% c('monogonont rotifers', 'Calanoid copepoda', 'Chironomidae', 'Collembola'))
+sum.herb<-ddply(sum.herb, .(pond, Temp), summarise, # calculate the abundance #
+                abundance = sum(Multiplier))
+sum.herb$Log.abun=log10(sum.herb$abundance) # create the log #
+
+# summarise data #
+df5<-data_summary(sum.herb, varname="Log.abun",
+                  groupnames=c("Temp"))
+df5[is.na(df5)]<-0
+
+# create the ggplot #
+abundance.plot.herb<- ggplot(df5, aes(x=Temp, y=Log.abun)) +
+  ylim(0,4) +
+  geom_pointrange(aes(ymin=Log.abun-sd, ymax=Log.abun+sd))
+print(abundance.plot.herb + ggtitle("Total log abundance of all herbivorous species in the ponds")) # show graph #
+
+# save the ggplot #
+ggsave("HerbAbundance.png")
+
+## total abundance for predatory zoops ##
+
+# create the data #
+sum.pred<-subset(df, subgroup %in% c('backswimmer', 'Ostracoda' ))
+sum.pred<-ddply(sum.pred, .(pond, Temp), summarise, # calculate the abundance #
+                abundance = sum(Multiplier))
+sum.pred$Log.abun=log10(sum.pred$abundance) # create the log #
+
+# summarise the data #
+df6<-data_summary(sum.pred, varname="Log.abun",
+                  groupnames=c("Temp"))
+df6[is.na(df6)]<-0
+
+# create the ggplot #
+abundance.plot.pred<- ggplot(df6, aes(x=Temp, y=Log.abun)) +
+  ylim(0,4) +
+  geom_pointrange(aes(ymin=Log.abun-sd, ymax=Log.abun+sd))
+print(abundance.plot.pred + ggtitle("Total log abundance of all predatory species in the ponds")) # show graph #
+
+# save the ggplot #
+ggsave("PredAbun.png")
+
+# combine all abundance graphs together #
+library(ggpubr)
+figure <- ggarrange(abundance.plot, abundance.plot.crus, abundance.plot.herb, abundance.plot.pred, abundance.plot.soft,
+                    labels = c("A", "B", "C", "D", "E"),
+                    common.legend = TRUE,
+                    ncol = 3, nrow = 2)
+figure
+ggsave("allAbundanceGraphs.png")
+
+### biomass results ###
+
+## total species population biomass ##
+
+# create the dataframe #
+sum.bio<-ddply(df, .(pond, subgroup, Temp), summarise,   # count the rows
+                biomass = mean(DWC))
+sum.bio$Pop.bio=sum.bio$biomass*sum.abun$abundance
+sum.bio$log.pop=-log10(sum.bio$Pop.bio)
+
+# summarise the dataset #
+dfB<-data_summary(sum.bio, varname="log.pop",
+                  groupnames=c("Temp"))
+dfB[is.na(dfB)]<-0
+
+# create ggplot #
+biomass.plot<- ggplot(dfB, aes(x=Temp, y=log.pop))+
+  ylim(-0.5,4) +
+  geom_pointrange(aes(ymin=log.pop-sd, ymax=log.pop+sd))
+print(biomass.plot + ggtitle("Total population biomass across all ponds")) # show graph 
+
+# save graph #
+ggsave("TotalBiomass.png")
+
+## biomass for microcrustacea ##
+
+# create the dataset #
+bio.crus<-subset(df, group %in% c('Crustacea' ))
+bio.crus<-ddply(bio.crus, .(pond, subgroup, Temp), summarise,   # count the rows
+               biomass = mean(DWC))
+bio.crus$Pop.bio=bio.crus$biomass*sum.crus$abundance
+bio.crus$log.pop=-log10(bio.crus$Pop.bio)
+
+# summarise data #
+dfB2<-data_summary(bio.crus, varname="log.pop",
+                  groupnames=c("Temp"))
+dfB2[is.na(dfB2)]<-0
+
+# create ggplot #
+biomass.plot.crus<- ggplot(dfB2, aes(x=Temp, y=log.pop))+
+  ylim(-0.5,4) +
+  geom_pointrange(aes(ymin=log.pop-sd, ymax=log.pop+sd))
+print(biomass.plot.crus + ggtitle("Total population biomass for all microcrustaceans")) # show graph 
+
+# save ggplot #
+ggsave("MicrocrustBio.png")
+
+## Total biomass for soft bodied meiofauna ##
+
+# create dataframe #
+bio.soft<-subset(df, group %in% c('Rotifera' ))
+bio.soft<-ddply(bio.soft, .(pond, subgroup, Temp), summarise,   # count the rows
+                biomass = mean(DWC))
+bio.soft$Pop.bio=bio.soft$biomass*sum.soft$abundance
+bio.soft$log.pop=-log10(bio.soft$Pop.bio)
+
+# summarise the data #
+dfB3<-data_summary(bio.soft, varname="log.pop",
+                   groupnames=c("Temp"))
+dfB3[is.na(dfB3)]<-0
+
+# create ggplot #
+biomass.plot.soft<- ggplot(dfB3, aes(x=Temp, y=log.pop))+
+  ylim(-0.5,4) +
+  geom_pointrange(aes(ymin=log.pop-sd, ymax=log.pop+sd))
+print(biomass.plot.soft + ggtitle("Total population biomass for all soft bodied meiofauna")) # show graph 
+
+# save ggplot #
+ggsave("MeiofaunaBiomass.png")
+
+## Total biomass for herbivorous species ##
+
+# create the dataframe #
+bio.herb<-subset(df, subgroup %in% c('monogonont rotifers', 'Calanoid copepoda', 'Chironomidae', 'Collembola'))
+bio.herb<-ddply(bio.herb, .(pond, Temp), summarise,   # count the rows
+                biomass = mean(DWC))
+bio.herb$Pop.bio=bio.herb$biomass*sum.herb$abundance
+bio.herb$log.pop=-log10(bio.herb$Pop.bio)
+
+# summarise the data #
+dfB4<-data_summary(bio.herb, varname="log.pop",
+                   groupnames=c("Temp"))
+dfB4[is.na(dfB4)]<-0
+
+# create ggplot #
+biomass.plot.herb<- ggplot(dfB4, aes(x=Temp, y=log.pop))+
+  ylim(-0.5,4) +
+  geom_pointrange(aes(ymin=log.pop-sd, ymax=log.pop+sd))
+print(biomass.plot.herb + ggtitle("Total population biomass for all herbivorous species")) # show graph 
+
+# save ggplot #
+ggsave("BiomassHerb.png")
+
+## Total biomass for predatory species ##
+
+# create dataframe #
+bio.pred<-subset(df, subgroup %in% c('backswimmer', 'Ostracoda'))
+bio.pred<-ddply(bio.pred, .(pond, Temp), summarise,   # count the rows
+                biomass = mean(DWC))
+bio.pred$Pop.bio=bio.pred$biomass*sum.pred$abundance
+bio.pred$log.pop=-log10(bio.pred$Pop.bio)
+
+# summarise the data #
+dfB5<-data_summary(bio.pred, varname="log.pop",
+                   groupnames=c("Temp"))
+dfB5[is.na(dfB5)]<-0
+
+# create the ggplot #
+biomass.plot.pred<- ggplot(dfB5, aes(x=Temp, y=log.pop))+
+  ylim(-0.5,4) +
+  geom_pointrange(aes(ymin=log.pop-sd, ymax=log.pop+sd))
+print(biomass.plot.pred + ggtitle("Total population biomass for all predatory species")) # show graph 
+
+# save the ggplot #
+ggsave("BiomassPred.png")
+
+# combine all biomass graphs #
+library(ggpubr)
+figure2 <- ggarrange(biomass.plot, biomass.plot.crus, biomass.plot.herb, biomass.plot.pred, biomass.plot.soft,
+                    labels = c("A", "B", "C", "D", "E"),
+                    common.legend = TRUE,
+                    ncol = 3, nrow = 2)
+figure2
+ggsave("allBiomassGraphs.png")
+
+### size spectrum data ###
+
+### decomposition rates ###
+
+# summarise teabag decomposition rates # 
+dfD<-data_summary(teabags, varname="Weight.lost.g.",
+                   groupnames=c("Temp", "teabag"))
+dfD[is.na(dfD)]<-0
+
+# create ggplot #
+decomposition<- ggplot(dfD, aes(x=Temp, y=Weight.lost.g., shape=teabag, colour=teabag)) +
+  geom_pointrange(aes(ymin=Weight.lost.g.-sd, ymax=Weight.lost.g.+sd))
+print(decomposition + ggtitle("Total mean decomposition across the temperature gradients")) # show graph 
+
+# save ggplot #
+ggsave("Decomposition.png")
+
+
+
+## Anova for teabags ##
+green<- subset(teabags, teabag=="Green")
+red<-subset(teabags, teabag=="Red")
+
+# Linear model and Anova for green teabags #
+install.packages("multcomp")
+library(multcomp)
+green.tea.1 <- lm(Weight.lost.g. ~ Temp, data = green) # all together
+summary(green.tea.1)
+anova(green.tea.1)
+green.tea <- lm(Weight.lost.g. ~ as.factor(Temp), data = green) # per temp
+summary(green.tea)
+anova(green.tea)
+
+# create linear regression plot
+par(mfrow=c(1,2))
+plot(green$Temp, green$Weight.lost.g., las=1, xlab="Temperature", ylab="Weight lost (g)", main="Linear regression for green tea")
+abline(green.tea.1, lwd=3, col="green")
+
+# Linear model and Anova for red teabags #
+red.tea.1 <- lm(Weight.lost.g. ~ Temp, data = red) # all together
+summary(red.tea.1)
+anova(red.tea.1)
+
+red.tea <- lm(Weight.lost.g. ~ as.factor(Temp), data = red) # per temp
+summary(red.tea)
+anova(red.tea)
+
+# create regression plot #
+roo.plot<-plot(red$Temp, red$Weight.lost.g., las=1, xlab="Temperature", ylab= "Weight lost (g)", main="Linear regression for red tea")
+abline(red.tea.1, lwd=3, col="red")
+
+## regression for abundance ##
+lm.abun<-lm(Log.abun~Temp, data=sum.abun) # total abun
+summary(lm.abun)
+anova(lm.abun)
+
+lm.crus<-lm(Log.abun~as.factor(Temp), data=sum.crus) # crust
+summary(lm.crus)
+anova(lm.crus)
+
+lm.herb<-lm(Log.abun~as.factor(Temp), data=sum.herb) # herb
+summary(lm.herb)
+
+lm.pred<-lm(Log.abun~as.factor(Temp), data=sum.pred) # pred
+summary(lm.pred)
+
+lm.soft<-lm(Log.abun~as.factor(Temp), data=sum.soft) # soft
+summary(lm.soft)
+
+## regression for biomass
+
+lm.bio<-lm(log.pop~as.factor(Temp), data=sum.bio) # all
+summary(lm.bio)
+
+lm.bcrus<-lm(log.pop~as.factor(Temp), data=bio.crus) #crus
+summary(lm.crus)
+
+lm.bherb<-lm(log.pop~as.factor(Temp), data=bio.herb) # herb
+summary(lm.bherb)
+
+lm.bpred<-lm(log.pop~as.factor(Temp), data=bio.pred) # pred
+summary(lm.bpred)
+
+lm.bsoft<-lm(log.pop~as.factor(Temp), data=bio.soft) # soft
+summary(lm.bsoft)
